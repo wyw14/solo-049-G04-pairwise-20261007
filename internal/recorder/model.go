@@ -33,7 +33,8 @@ type Segment struct {
 }
 
 type SealResult struct {
-	Segment  Segment `json:"segment"`
-	Complete bool    `json:"complete"`
-	Error    string  `json:"error,omitempty"`
+	Segment      Segment       `json:"segment"`
+	Complete     bool          `json:"complete"`
+	Error        string        `json:"error,omitempty"`
+	Verification *Verification `json:"verification,omitempty"`
 }

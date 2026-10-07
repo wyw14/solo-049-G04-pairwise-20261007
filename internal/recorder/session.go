@@ -19,15 +19,17 @@ type session struct {
 type Manager struct {
 	mu       sync.RWMutex
 	path     string
+	paths    store.Paths
 	sessions map[string]*session
+	indexes  map[string]*SegmentIndex
 	writer   *FrameWriter
 	audit    *audit.Trail
 }
 
 func NewManager(paths store.Paths, trail *audit.Trail) (*Manager, error) {
 	manager := &Manager{
-		path: paths.Snapshot("recording-sessions"), sessions: make(map[string]*session),
-		writer: NewFrameWriter(paths), audit: trail,
+		path: paths.Snapshot("recording-sessions"), paths: paths, sessions: make(map[string]*session),
+		indexes: make(map[string]*SegmentIndex), writer: NewFrameWriter(paths), audit: trail,
 	}
 	var segments []Segment
 	found, err := store.ReadJSON(manager.path, &segments)
@@ -39,6 +41,9 @@ func NewManager(paths store.Paths, trail *audit.Trail) (*Manager, error) {
 			copy := segment
 			manager.sessions[segment.ID] = &session{segment: copy}
 		}
+	}
+	if err := manager.recoverIndexesLocked(); err != nil {
+		return nil, err
 	}
 	return manager, nil
 }
@@ -59,8 +64,16 @@ func (m *Manager) Start(passID, ownerStation string, generation int64) (Segment,
 		OwnerGeneration: generation, Status: Open, StartedAt: time.Now().UTC(),
 	}
 	m.sessions[segment.ID] = &session{segment: segment, buffer: make([]Frame, 0, 256)}
+	index := newSegmentIndex(segment.ID)
+	m.indexes[segment.ID] = index
+	if err := m.persistIndexLocked(index); err != nil {
+		delete(m.sessions, segment.ID)
+		delete(m.indexes, segment.ID)
+		return Segment{}, err
+	}
 	if err := m.flushLocked(); err != nil {
 		delete(m.sessions, segment.ID)
+		delete(m.indexes, segment.ID)
 		return Segment{}, err
 	}
 	_, _ = m.audit.Record(audit.Event{Component: "recorder", Action: "started", Subject: segment.ID, Fields: map[string]any{"pass_id": passID, "owner": ownerStation, "generation": generation}})

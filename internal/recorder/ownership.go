@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"fmt"
+	"time"
 
 	"orbitlink/internal/audit"
 )
@@ -42,7 +43,25 @@ func (m *Manager) CloseForOwner(segmentID, station string, expectedGeneration in
 	if len(current.buffer) > 0 {
 		return fmt.Errorf("owner close rejected while %d frames remain buffered", len(current.buffer))
 	}
+	verification, err := m.verifySegmentLocked(segmentID, false)
+	if err != nil {
+		return err
+	}
+	if !verification.Passed() {
+		_, _ = m.audit.Record(audit.Event{Component: "recorder", Action: "index.seal_rejected", Subject: segmentID, Severity: audit.Warning, Fields: map[string]any{"station": station, "truncated": verification.Truncated, "corrupt": verification.Corrupt, "detail": verification.Detail}})
+		return fmt.Errorf("owner close rejected: integrity verification failed: %s", verification.Detail)
+	}
 	current.segment.Status = Sealed
 	current.segment.SealReason = reason
+	index, err := m.indexLocked(segmentID)
+	if err != nil {
+		return err
+	}
+	index.Sealed = true
+	index.Complete = true
+	index.SealedAt = time.Now().UTC()
+	if err := m.persistIndexLocked(index); err != nil {
+		return err
+	}
 	return m.flushLocked()
 }

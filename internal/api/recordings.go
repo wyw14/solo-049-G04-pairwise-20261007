@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -35,6 +37,40 @@ func (r *Runtime) appendFrame(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	writeJSON(writer, http.StatusAccepted, map[string]any{"buffered": true, "sequence": input.Sequence})
+}
+
+func (r *Runtime) recordingIntegrity(writer http.ResponseWriter, request *http.Request) {
+	report, err := r.Recorder.Verify(chi.URLParam(request, "segmentID"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, report)
+}
+
+func (r *Runtime) recordingIndex(writer http.ResponseWriter, request *http.Request) {
+	index, err := r.Recorder.Index(chi.URLParam(request, "segmentID"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, index)
+}
+
+func (r *Runtime) exportRecording(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Destination string `json:"destination"`
+	}
+	if err := decodeJSON(request, &input); err != nil && !errors.Is(err, io.EOF) {
+		writeError(writer, err)
+		return
+	}
+	result, err := r.Recorder.Export(chi.URLParam(request, "segmentID"), input.Destination)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, result)
 }
 
 func (r *Runtime) listAudit(writer http.ResponseWriter, request *http.Request) {

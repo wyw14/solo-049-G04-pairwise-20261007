@@ -27,6 +27,14 @@ func (p Paths) Recording(id string) string {
 	return filepath.Join(p.Root, "recordings", safeName(id)+".frames")
 }
 
+func (p Paths) RecordingIndex(id string) string {
+	return filepath.Join(p.Root, "recordings", safeName(id)+".index.jsonl")
+}
+
+func (p Paths) ExportDir(id string) string {
+	return filepath.Join(p.Root, "exports", safeName(id))
+}
+
 func (p Paths) Validate() error {
 	if p.Root == "." || strings.TrimSpace(p.Root) == "" {
 		return fmt.Errorf("state root is required")

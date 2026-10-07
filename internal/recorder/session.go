@@ -19,15 +19,18 @@ type session struct {
 type Manager struct {
 	mu       sync.RWMutex
 	path     string
+	paths    store.Paths
 	sessions map[string]*session
 	writer   *FrameWriter
+	index    *IndexLog
 	audit    *audit.Trail
 }
 
 func NewManager(paths store.Paths, trail *audit.Trail) (*Manager, error) {
+	index := NewIndexLog(paths)
 	manager := &Manager{
-		path: paths.Snapshot("recording-sessions"), sessions: make(map[string]*session),
-		writer: NewFrameWriter(paths), audit: trail,
+		path: paths.Snapshot("recording-sessions"), paths: paths, sessions: make(map[string]*session),
+		writer: NewFrameWriter(paths, index), index: index, audit: trail,
 	}
 	var segments []Segment
 	found, err := store.ReadJSON(manager.path, &segments)
@@ -39,6 +42,9 @@ func NewManager(paths store.Paths, trail *audit.Trail) (*Manager, error) {
 			copy := segment
 			manager.sessions[segment.ID] = &session{segment: copy}
 		}
+	}
+	if err := manager.recoverSegments(); err != nil {
+		return nil, err
 	}
 	return manager, nil
 }

@@ -49,7 +49,15 @@ func (m *Manager) Drain(ctx context.Context, segmentID string) (int, error) {
 	return written, err
 }
 
+// Seal binds the integrity index to the sealed state: the recording is
+// rescanned and verified first, and only a passing verification lets the
+// segment be marked complete. A failed verification leaves the segment
+// unsealed so the damage cannot be papered over.
 func (m *Manager) Seal(segmentID, reason string) (SealResult, error) {
+	report, err := m.Verify(segmentID)
+	if err != nil {
+		return SealResult{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, found := m.sessions[segmentID]
@@ -59,12 +67,41 @@ func (m *Manager) Seal(segmentID, reason string) (SealResult, error) {
 	if len(current.buffer) != 0 {
 		return SealResult{Segment: current.segment, Complete: false, Error: "frames remain buffered"}, fmt.Errorf("recording still has %d buffered frames", len(current.buffer))
 	}
+	if !report.OK {
+		_, _ = m.audit.Record(audit.Event{
+			Component: "recorder", Action: "seal.rejected", Subject: segmentID, Severity: audit.Critical,
+			Fields: map[string]any{"corrupt": len(report.Corrupt), "truncated_tail": report.TruncatedTail, "index_diverged": report.IndexDiverged},
+		})
+		return SealResult{Segment: current.segment, Complete: false, Error: "integrity verification failed", Verification: &report},
+			fmt.Errorf("recording segment %s failed integrity verification", segmentID)
+	}
+	if current.segment.Status == Sealed {
+		// Already in the terminal state; a repeated seal after a verified
+		// rescan is idempotent so retries stay safe.
+		return SealResult{Segment: current.segment, Complete: true, Verification: &report}, nil
+	}
+	if report.Frames != current.segment.FramesWritten {
+		return SealResult{Segment: current.segment, Complete: false, Error: "recording changed during seal", Verification: &report},
+			fmt.Errorf("recording segment %s changed during seal, retry", segmentID)
+	}
+	sealedAt := time.Now().UTC()
+	seal := SealRecord{
+		Frames: report.Frames, Bytes: report.Bytes, Gaps: len(report.Gaps),
+		Digest: report.Digest, SealedAt: sealedAt,
+	}
+	if err := m.index.Seal(segmentID, seal); err != nil {
+		return SealResult{}, err
+	}
 	current.segment.Status = Sealed
 	current.segment.SealReason = reason
-	current.segment.SealedAt = time.Now().UTC()
+	current.segment.SealedAt = sealedAt
+	current.segment.Integrity = IntegritySummary{
+		Verified: true, CheckedAt: report.CheckedAt,
+		Frames: report.Frames, Gaps: len(report.Gaps), Digest: report.Digest,
+	}
 	if err := m.flushLocked(); err != nil {
 		return SealResult{}, err
 	}
-	_, _ = m.audit.Record(audit.Event{Component: "recorder", Action: "sealed", Subject: segmentID, Fields: map[string]any{"frames": current.segment.FramesWritten, "reason": reason}})
-	return SealResult{Segment: current.segment, Complete: true}, nil
+	_, _ = m.audit.Record(audit.Event{Component: "recorder", Action: "sealed", Subject: segmentID, Fields: map[string]any{"frames": current.segment.FramesWritten, "reason": reason, "gaps": len(report.Gaps), "digest": report.Digest}})
+	return SealResult{Segment: current.segment, Complete: true, Verification: &report}, nil
 }

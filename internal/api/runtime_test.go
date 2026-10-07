@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +123,96 @@ func TestRouterRejectsOverlappingReservation(t *testing.T) {
 	}
 	if _, err := runtime.Reservations.ReservePass(second.ID, second.AntennaID); err == nil {
 		t.Fatal("overlapping reservation unexpectedly succeeded")
+	}
+}
+
+func TestRecordingIntegrityIndexAndExportAPI(t *testing.T) {
+	runtime := newTestRuntime(t)
+	segment, err := runtime.Recorder.Start("pass-integrity", "north", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router, err := NewRouter(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(router)
+	defer server.Close()
+	for _, sequence := range []int{1, 2, 4} {
+		payload := fmt.Sprintf(`{"sequence": %d, "epoch": 3}`, sequence)
+		response := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/recordings/"+segment.ID+"/frames", payload)
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("append frame returned %d", response.StatusCode)
+		}
+		_ = response.Body.Close()
+	}
+	if _, err := runtime.Recorder.Drain(context.Background(), segment.ID); err != nil {
+		t.Fatal(err)
+	}
+	seal, err := runtime.Recorder.Seal(segment.ID, "api test seal")
+	if err != nil || !seal.Complete {
+		t.Fatalf("seal did not complete: %#v %v", seal, err)
+	}
+
+	response, err := server.Client().Get(server.URL + "/api/recordings/" + segment.ID + "/integrity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		OK     bool `json:"ok"`
+		Frames int  `json:"frames"`
+		Gaps   []struct {
+			From  uint64 `json:"from"`
+			To    uint64 `json:"to"`
+			Count uint64 `json:"count"`
+		} `json:"gaps"`
+	}
+	decodeBody(t, response, &report)
+	if !report.OK || report.Frames != 3 {
+		t.Fatalf("integrity report not clean: %#v", report)
+	}
+	if len(report.Gaps) != 1 || report.Gaps[0].From != 3 || report.Gaps[0].To != 3 {
+		t.Fatalf("missing frame 3 was not located: %#v", report.Gaps)
+	}
+
+	response, err = server.Client().Get(server.URL + "/api/recordings/" + segment.ID + "/index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Entries []struct {
+			Sequence uint64 `json:"sequence"`
+			Offset   int64  `json:"offset"`
+		} `json:"entries"`
+		Seal *struct {
+			Digest string `json:"digest"`
+		} `json:"seal"`
+	}
+	decodeBody(t, response, &index)
+	if len(index.Entries) != 3 || index.Seal == nil || index.Seal.Digest == "" {
+		t.Fatalf("index is incomplete or unsealed: %#v", index)
+	}
+
+	response = requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/recordings/"+segment.ID+"/export", `{}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("export returned %d", response.StatusCode)
+	}
+	var exported struct {
+		FramesFile string `json:"frames_file"`
+		Report     struct {
+			OK bool `json:"ok"`
+		} `json:"report"`
+	}
+	decodeBody(t, response, &exported)
+	if !exported.Report.OK {
+		t.Fatal("export did not carry a passing verification")
+	}
+	info, err := os.Stat(exported.FramesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o444 {
+		t.Fatalf("exported recording is not read-only: %v", info.Mode().Perm())
 	}
 }
 
